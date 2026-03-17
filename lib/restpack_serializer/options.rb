@@ -1,16 +1,16 @@
 module RestPack::Serializer
   class Options
-    attr_accessor :page, :page_size, :include, :filters, :serializer,
-                  :model_class, :scope, :context, :include_links,
+    attr_accessor :page, :page_size, :include, :filters, :custom_filters,
+                   :serializer, :model_class, :scope, :context, :include_links,
                   :sorting
 
     def initialize(serializer, params = {}, scope = nil, context = {})
       params.symbolize_keys! if params.respond_to?(:symbolize_keys!)
-
       @page = params[:page] ? params[:page].to_i : 1
       @page_size = params[:page_size] ? params[:page_size].to_i : RestPack::Serializer.config.page_size
       @include = params[:include] ? params[:include].split(',') : []
       @filters = filters_from_params(params, serializer)
+      @custom_filters = custom_filters_from_params(params, serializer)
       @sorting = sorting_from_params(params, serializer)
       @serializer = serializer
       @model_class = serializer.model_class
@@ -21,12 +21,26 @@ module RestPack::Serializer
 
     def scope_with_filters
       scope_filter = {}
-
-      @filters.keys.each do |filter|
-        value = query_to_array(@filters[filter])
-        scope_filter[filter] = value
+      @filters.each do |key, value|
+        unless model_class.column_names.include? key
+          # It's not a real column, but it might contain a date filter, check to make sure
+          suffix_position = key =~ /(#{serializer.date_filter_suffixes.collect { |s| '_'+Regexp.escape(s) }.join('|')})$/
+          if suffix_position
+            column_name = key.slice(0...suffix_position)
+            if model_class.column_names.include? column_name
+              # yep, it's a filter
+              suffix = key.slice((suffix_position+1)..-1)
+              operator = serializer.map_date_filter_suffix_to_operator(suffix)
+              clause = "#{model_class.table_name}.#{column_name} #{operator} ?"
+              @scope = @scope.where(clause, DateTime.parse(value[0]))
+              next
+            end
+          end
+        end
+        # We can fall through from the above logic to here
+        value = query_to_array(@filters[key])
+        scope_filter[key] = value
       end
-
       @scope.where(scope_filter)
     end
 
@@ -35,7 +49,11 @@ module RestPack::Serializer
     end
 
     def filters_as_url_params
-      @filters.sort.map { |k,v| map_filter_ids(k,v) }.join('&')
+      @filters.stringify_keys.sort.map { |k,v| map_filter_ids(k,v) }.join('&')
+    end
+
+    def custom_filters_as_url_params
+      @custom_filters.stringify_keys.sort.map { |k,v| map_filter_ids(k,v) }.join('&')
     end
 
     def sorting_as_url_params
@@ -48,6 +66,16 @@ module RestPack::Serializer
     def filters_from_params(params, serializer)
       filters = {}
       serializer.filterable_by.each do |filter|
+        [filter, "#{filter}s".to_sym].each do |key|
+          filters[filter] = params[key].to_s.split(',') if params[key]
+        end
+      end
+      filters
+    end
+
+    def custom_filters_from_params(params, serializer)
+      filters = {}
+      serializer.custom_filterable_by.each do |filter|
         [filter, "#{filter}s".to_sym].each do |key|
           filters[filter] = params[key].to_s.split(',') if params[key]
         end

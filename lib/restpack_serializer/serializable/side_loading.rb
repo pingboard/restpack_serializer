@@ -45,6 +45,7 @@ module RestPack::Serializer::SideLoading
     end
 
     def associations
+      return [] unless @can_includes
       can_includes.map do |include|
         association = association_from_include(include)
         association if supported_association?(association.macro)
@@ -59,7 +60,8 @@ module RestPack::Serializer::SideLoading
       serializer = RestPack::Serializer::Factory.create(association.class_name)
       builder = RestPack::Serializer::SideLoadDataBuilder.new(association,
                                                               models,
-                                                              serializer)
+                                                              serializer,
+                                                              options)
       builder.send("side_load_#{association.macro}")
     end
 

@@ -2,33 +2,47 @@ module RestPack
   module Serializer
     class SideLoadDataBuilder
 
-      def initialize(association, models, serializer)
+      def initialize(association, models, serializer, root_options)
         @association = association
         @models = models
         @serializer = serializer
+        @root_options = root_options
       end
 
       def side_load_belongs_to
+        context = @root_options.context.dup
+        context[:singular] = true
         foreign_keys = @models.map { |model| model.send(@association.foreign_key) }.uniq.compact
         side_load = foreign_keys.any? ? @association.klass.find(foreign_keys) : []
-        json_model_data = side_load.map { |model| @serializer.as_json(model) }
+        json_model_data = side_load.map { |model| @serializer.as_json(model, context) }
         { @association.plural_name.to_sym => json_model_data, meta: { } }
       end
 
       def side_load_has_many
         has_association_relation do |options|
-          if join_table = @association.options[:through]
-            options.scope = options.scope.joins(join_table).distinct
-            association_fk = @association.through_reflection.foreign_key.to_sym
-            options.filters = { join_table => { association_fk => model_ids } }
+          options.context[:singular] = false
+          if @root_options.context.has_key?(:"#{@association.name}_association_values")
+            options.scope = @root_options.context[:"#{@association.name}_association_values"]
           else
-            options.filters = { @association.foreign_key.to_sym => model_ids }
+            # add dynamic filters from @root_options
+            extra_scope = @root_options.context.fetch(:"#{@association.name}_association_scope", nil)
+            if extra_scope
+              options.scope = options.scope.where(extra_scope)
+            end
+            if join_table = @association.options[:through]
+              options.scope = options.scope.joins(join_table).distinct
+              association_fk = @association.through_reflection.foreign_key.to_sym
+              options.filters = { join_table => { association_fk => model_ids } }
+            else
+              options.filters = { @association.foreign_key.to_sym => model_ids }
+            end
           end
         end
       end
 
       def side_load_has_and_belongs_to_many
         has_association_relation do |options|
+          options.context[:singular] = false
           join_table_name = @association.join_table
           join_clause = "join #{join_table_name} on #{@association.plural_name}.id = #{join_table_name}.#{@association.class_name.foreign_key}"
           options.scope = options.scope.joins(join_clause)
@@ -46,7 +60,7 @@ module RestPack
       def has_association_relation
         return {} if @models.empty?
         serializer_class = @serializer.class
-        options = RestPack::Serializer::Options.new(serializer_class)
+        options = RestPack::Serializer::Options.new(serializer_class, {}, nil, @root_options.context)
         yield options
         options.include_links = false
         serializer_class.page_with_options(options)

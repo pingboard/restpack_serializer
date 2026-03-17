@@ -7,7 +7,6 @@ require_relative "serializable/resource"
 require_relative "serializable/single"
 require_relative "serializable/side_loading"
 require_relative "serializable/side_load_data_builder"
-require_relative "serializable/symbolizer"
 require_relative "serializable/sortable"
 
 module RestPack
@@ -39,22 +38,34 @@ module RestPack
       end
 
       @model, @context = model, context
+      user_defined_methods = self.class.user_defined_methods || []
 
       data = {}
       if self.class.serializable_attributes.present?
-        self.class.serializable_attributes.each do |key, name|
-          data[key] = self.send(name) if include_attribute?(name)
+        self.class.serializable_attributes.each do |key, attribute|
+          method_name = attribute[:include_method_name]
+          name = attribute[:name]
+
+          if user_defined_methods.include?(method_name)
+            data[key] = self.send(name) if self.send(method_name)
+          else
+            #the default implementation of `include_abc?`
+            if @context[method_name].nil? || @context[method_name]
+              data[key] = self.send(name)
+            end
+          end
         end
       end
 
       add_custom_attributes(data)
-      add_links(model, data)
+      add_links(model, data) unless self.class.associations.empty?
 
-      Symbolizer.recursive_symbolize(data)
+
+      data
     end
 
     def custom_attributes
-      {}
+      nil
     end
 
     private
@@ -66,15 +77,28 @@ module RestPack
 
     def add_links(model, data)
       self.class.associations.each do |association|
-        data[:links] ||= {}
+        data[:links] ||= {}        
         links_value = case
         when association.macro == :belongs_to
           model.send(association.foreign_key).try(:to_s)
         when association.macro.to_s.match(/has_/)
-          if model.send(association.name).loaded?
-            model.send(association.name).collect { |associated| associated.id.to_s }
+          scope_key = :"#{association.name}_association_scope"
+          scope_filter = :"#{association.name}_association_loaded_filter"
+          cache_key = :"#{association.name}_association_cache"
+          if @context[cache_key]
+            @context[cache_key].fetch(@model.id.to_s, []).map(&:to_s)
+          elsif respond_to?(scope_key)
+            if model.send(association.name).loaded? && respond_to?(scope_filter)
+              model.send(association.name).select { |associated| send(scope_filter, associated) }.collect { |associated| associated.id.to_s }
+            else
+              send(scope_key).pluck(:id).map(&:to_s)
+            end
           else
-            model.send(association.name).pluck(:id).map(&:to_s)
+            if model.send(association.name).loaded?
+              model.send(association.name).collect { |associated| associated.id.to_s }
+            else
+              model.send(association.name).pluck(:id).map(&:to_s)
+            end
           end
         end
         unless links_value.blank?
@@ -84,12 +108,16 @@ module RestPack
       data
     end
 
-    def include_attribute?(name)
-      self.send("include_#{name}?".to_sym)
-    end
-
     module ClassMethods
-      attr_accessor :model_class, :href_prefix, :key
+      attr_accessor :model_class, :href_prefix, :key, :user_defined_methods, :track_defined_methods
+
+      def method_added(name)
+        #we track used defined methods so that we can make quick decisions at runtime
+        @user_defined_methods ||= []
+        if @track_defined_methods
+          @user_defined_methods << name
+        end
+      end
 
       def array_as_json(models, context = {})
         new.as_json(models, context)

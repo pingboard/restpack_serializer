@@ -8,8 +8,7 @@ module RestPack::Serializer::Paging
 
     def page_with_options(options)
       page = options.scope_with_filters.page(options.page).per(options.page_size)
-      page = page.reorder(options.sorting) if options.sorting.any?
-
+      page = page.reorder(sort_clause(options.sorting)) if options.sorting.any?
       result = RestPack::Serializer::Result.new
       result.resources[self.key] = serialize_page(page, options)
       result.meta[self.key] = serialize_meta(page, options)
@@ -34,19 +33,18 @@ module RestPack::Serializer::Paging
     end
 
     def serialize_meta(page, options)
+      # Singular resources don't require any of this metadata
+      return {} if options.context.fetch(:singular, false)
       meta = {
           page: page.current_page,
           page_size: page.limit_value,
           count: page.total_count,
-          include: options.include,
           page_count: page.total_pages,
-          previous_page: page.prev_page,
-          next_page: page.next_page
       }
 
       meta[:first_href] = page_href(1, options)
-      meta[:previous_href] = page_href(meta[:previous_page], options)
-      meta[:next_href] = page_href(meta[:next_page], options)
+      meta[:previous_href] = page_href(page.prev_page, options)
+      meta[:next_href] = page_href(page.next_page, options)
       meta[:last_href] = page_href(meta[:page_count], options)
       meta
     end
@@ -62,9 +60,35 @@ module RestPack::Serializer::Paging
       params << "include=#{options.include.join(',')}" if options.include.any?
       params << options.sorting_as_url_params if options.sorting.any?
       params << options.filters_as_url_params if options.filters.any?
+      params << options.custom_filters_as_url_params if options.custom_filters.any?
 
-      url += '?' + params.join('&') if params.any?
+      # TODO: refactor all the param generating methods above to generate a hash directly instead
+      #       of string parameters
+      return url unless params.any?
+      normalized_params = []
+      params.each do |param_string|
+        normalized_params += param_string.split(/[&?]/)
+      end
+      hash_params = Hash[normalized_params.map { |p| p.split("=") }.sort]
+      url += '?' + hash_params.to_query if params.any?
       url
+    end
+
+    def sort_clause sorting_parameters
+      # NB: Something strange going on here where using ||= will always choose the default value
+      #     but || does not
+      ci_attrs = case_insensitive_sorting_attributes || []
+      md_attrs = month_day_sorting_attributes || []
+      sorting_parameters.map do |col_name, sort_direction|
+        if md_attrs.include? col_name
+          # DOY is day of year, so jan 1 is 1, regardless of year
+          col_name = "EXTRACT(DOY FROM #{col_name})"
+        end
+        if ci_attrs.include? col_name
+          col_name = "LOWER(#{col_name})"
+        end
+        [col_name, sort_direction].join(" ")
+      end.join(",")
     end
   end
 end
